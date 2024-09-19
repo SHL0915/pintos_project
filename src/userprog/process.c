@@ -87,7 +87,7 @@ start_process(void *file_name_) {
    does nothing. */
 int
 process_wait(tid_t child_tid UNUSED) {
-    timer_msleep(5);
+    timer_msleep(2000);
     return -1;
 }
 
@@ -328,7 +328,6 @@ load(const char *file_name, void (**eip)(void), void **esp) {
         } else now[nptr++] = c;
     }
     
-    
     now[nptr++] = '\0';
     args[aptr] = (char *) malloc(sizeof(char) * (strlen(now) + 1));
     strlcpy(args[aptr], now, strlen(now) + 1);
@@ -355,6 +354,7 @@ load(const char *file_name, void (**eip)(void), void **esp) {
         *esp -= 4;
         **((uint32_t **) esp) = args[i];
     }
+    free(args);
     
     *esp -= 4;
     **((uint32_t **) esp) = *esp + 4;
@@ -364,18 +364,6 @@ load(const char *file_name, void (**eip)(void), void **esp) {
     
     *esp -= 4;
     **((uint32_t **) esp) = 0;
-    
-    free(args);
-    
-    printf("hex dump in construct_stack start\n\n");
-    hex_dump(*esp, *esp, 100, true);
-    
-    
-    
-    
-    
-    
-    
     
     /* Start address. */
     *eip = (void (*)(void)) ehdr.e_entry;
