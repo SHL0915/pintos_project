@@ -38,11 +38,29 @@ process_execute(const char *file_name) {
     if (fn_copy == NULL)
         return TID_ERROR;
     strlcpy(fn_copy, file_name, PGSIZE);
-    
-    /* Create a new thread to execute FILE_NAME. */
-    tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
+
+    char * cmd_type = (char *) malloc(sizeof(char) * (strlen(file_name) + 1));
+
+    int idx = 0;
+    for(; idx < strlen(file_name); idx++) {
+        if (file_name[idx] == ' ') break;
+        else cmd_type[idx] = file_name[idx];
+    }
+    cmd_type[idx] = '\0';
+
+    if (!filesys_open(cmd_type)) {
+        free(cmd_type);
+        return -1;
+    }
+    else {
+        /* Create a new thread to execute FILE_NAME. */
+        tid = thread_create(cmd_type, PRI_DEFAULT, start_process, fn_copy);
+        free(cmd_type);
+    }
+
     if (tid == TID_ERROR)
         palloc_free_page(fn_copy);
+
     return tid;
 }
 
@@ -87,8 +105,24 @@ start_process(void *file_name_) {
    does nothing. */
 int
 process_wait(tid_t child_tid UNUSED) {
-    timer_msleep(2000);
-    return -1;
+    struct thread * child;
+    struct list_elem * now = list_begin(&(thread_current()->childs));
+
+    for(; now != list_end(&(thread_current()->childs)); now = list_next(now)) {
+        if(list_entry(now, struct thread, child_elems)->tid == child_tid) {
+            child = list_entry(now, struct thread, child_elems);
+            break;
+        }        
+    }
+
+    if (now == list_end(&(thread_current()->childs))) return -1;
+
+    sema_down(&(child->sema_all));
+    int ret = child->exit_stat;
+    list_remove(&(child->child_elems));
+    sema_up(&(child->sema_child));
+
+    return ret;
 }
 
 /* Free the current process's resources. */
@@ -112,6 +146,9 @@ process_exit(void) {
         pagedir_activate(NULL);
         pagedir_destroy(pd);
     }
+
+    sema_up(&(cur->sema_all));
+    sema_down(&(cur->sema_child));
 }
 
 /* Sets up the CPU for running user code in the current
@@ -246,7 +283,7 @@ load(const char *file_name, void (**eip)(void), void **esp) {
         || ehdr.e_version != 1
         || ehdr.e_phentsize != sizeof(struct Elf32_Phdr)
         || ehdr.e_phnum > 1024) {
-        printf("load: %s: error loading executable\n", file_name);
+        printf("load: %s: error loading executable\n", fname);
         goto done;
     }
     
@@ -321,20 +358,25 @@ load(const char *file_name, void (**eip)(void), void **esp) {
         char c = file_name[i];
         if (c == ' ') {
             now[nptr++] = '\0';
-            args[aptr] = (char *) malloc(sizeof(char) * (strlen(now) + 1));
-            strlcpy(args[aptr], now, strlen(now) + 1);
+            if(strlen(now) != 0) {
+                args[aptr] = (char *) malloc(sizeof(char) * (strlen(now) + 1));
+                strlcpy(args[aptr], now, strlen(now) + 1);                
+                aptr++;
+            }
             nptr = 0;
-            aptr++;
         } else now[nptr++] = c;
     }
     
     now[nptr++] = '\0';
-    args[aptr] = (char *) malloc(sizeof(char) * (strlen(now) + 1));
-    strlcpy(args[aptr], now, strlen(now) + 1);
+    if(strlen(now) != 0) {
+        args[aptr] = (char *) malloc(sizeof(char) * (strlen(now) + 1));
+        strlcpy(args[aptr], now, strlen(now) + 1);                
+        aptr++;
+    }
     
     free(now);
     
-    for (int i = argcnt - 1; i >= 0; i--) {
+    for (int i = aptr - 1; i >= 0; i--) {
         int nlen = strlen(args[i]) + 1;
         tot += nlen;
         *esp -= nlen;
@@ -350,7 +392,7 @@ load(const char *file_name, void (**eip)(void), void **esp) {
     *esp -= 4;
     **((uint32_t **) esp) = 0;
     
-    for (int i = argcnt - 1; i >= 0; i--) {
+    for (int i = aptr - 1; i >= 0; i--) {
         *esp -= 4;
         **((uint32_t **) esp) = args[i];
     }
@@ -360,7 +402,7 @@ load(const char *file_name, void (**eip)(void), void **esp) {
     **((uint32_t **) esp) = *esp + 4;
     
     *esp -= 4;
-    **((uint32_t **) esp) = argcnt;
+    **((uint32_t **) esp) = aptr;
     
     *esp -= 4;
     **((uint32_t **) esp) = 0;
