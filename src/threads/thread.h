@@ -5,6 +5,11 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/synch.h"
+#include "lib/kernel/hash.h"
+
+#ifndef USERPROG
+extern bool thread_prior_aging;
+#endif
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -24,6 +29,8 @@ typedef int tid_t;
 #define PRI_MIN 0                       /* Lowest priority. */
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
+#define MAX_FILE 155
+#define ONE (1 << 14)
 
 /* A kernel thread or user process.
 
@@ -94,15 +101,23 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
-#ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
     int exit_stat;
+    struct file * fd[MAX_FILE];
+    struct semaphore sema_all;
+    struct semaphore sema_child;
+    struct semaphore sema_create;
+    struct lock file_lock;
+    struct thread * parent_process;
     struct list childs;
     struct list_elem child_elems;
-    struct semaphore sema_child;
-    struct semaphore sema_all;
-#endif
+
+    int64_t wake_up_time;
+    int recent_cpu;
+    int nice;
+
+    struct hash virtual_page_table;
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
@@ -143,5 +158,26 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+bool thread_compare_(const struct list_elem * a, const struct list_elem * b, void * aux);
+
+void thread_aging();
+
+void update_load_average(void);
+void update_recent_cpu(void);
+void update_priority(void);
+void tick_mlfqs(void);
+
+int i_to_f(int a);
+int f_to_i(int a);
+int f_plus_f(int a, int b);
+int f_plus_i(int a, int b);
+int f_minus_f(int a, int b);
+int i_minus_f(int a, int b);
+int f_mul_f(int a, int b);
+int i_mul_f(int a, int b);
+int f_div_f(int a, int b);
+int f_div_i(int a, int b);
+
 
 #endif /* threads/thread.h */

@@ -8,4 +8,6 @@ int _wait (tid_t);
 void _exit (void);
 void _activate (void);
 
+bool try_growing_stack(void *addr);
+
 #endif /* userprog/.h */

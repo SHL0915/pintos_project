@@ -47,7 +47,7 @@ process_execute(const char *file_name) {
         else cmd_type[idx] = file_name[idx];
     }
     cmd_type[idx] = '\0';
-
+    
     if (!filesys_open(cmd_type)) {
         free(cmd_type);
         return -1;
@@ -55,13 +55,25 @@ process_execute(const char *file_name) {
     else {
         /* Create a new thread to execute FILE_NAME. */
         tid = thread_create(cmd_type, PRI_DEFAULT, start_process, fn_copy);
+        sema_down(&thread_current()->sema_create);
         free(cmd_type);
     }
 
     if (tid == TID_ERROR)
         palloc_free_page(fn_copy);
 
-    return tid;
+    int flag = 0;
+
+    struct list_elem * now = list_begin(&(thread_current()->childs));
+    for(; now != list_end(&(thread_current()->childs)); now = list_next(now)) {
+        if(list_entry(now, struct thread, child_elems)->exit_stat == -1) {
+            flag++;
+            break;
+        }        
+    }
+
+    if(flag) return process_wait(tid);
+    else return tid;
 }
 
 /* A thread function that loads a user process and starts it
@@ -81,8 +93,10 @@ start_process(void *file_name_) {
     
     /* If load failed, quit. */
     palloc_free_page(file_name);
+
+    sema_up(&thread_current()->parent_process->sema_create);
     if (!success)
-        thread_exit();
+        exit(-1);
     
     /* Start the user process by simulating a return from an
        interrupt, implemented by intr_exit (in
@@ -270,7 +284,7 @@ load(const char *file_name, void (**eip)(void), void **esp) {
     file = filesys_open(fname);
     
     if (file == NULL) {
-        printf("load: %s: open failed\n", fname);
+        printf("load: %s: open failed\n", fname);     
         free(fname);
         goto done;
     } else free(fname);
@@ -556,4 +570,12 @@ install_page(void *upage, void *kpage, bool writable) {
        address, then map our page there. */
     return (pagedir_get_page(t->pagedir, upage) == NULL
             && pagedir_set_page(t->pagedir, upage, kpage, writable));
+}
+
+bool try_growing_stack(void *addr) {
+    if (PHYS_BASE > addr + (1 << 23)) return false;
+    struct thread * t = thread_current();
+    pagedir_get_page(t->pagedir, pg_round_down(addr));
+    pagedir_set_page(t->pagedir, pg_round_down(addr), palloc_get_page(PAL_USER), true);
+    return true;
 }

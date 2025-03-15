@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -54,6 +55,12 @@ static long long user_ticks;    /* # of timer ticks in user programs. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
 static unsigned thread_ticks;   /* # of timer ticks since last yield. */
 
+#ifndef USERPROG
+bool thread_prior_aging;
+#endif
+
+static int load_average;
+
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
@@ -70,6 +77,10 @@ static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
+
+bool thread_compare_(const struct list_elem * a, const struct list_elem * b, void * aux) {
+  return list_entry(a, struct thread, elem)->priority > list_entry(b, struct thread, elem)->priority;
+}
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -92,12 +103,16 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  load_average = 0;
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
+
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+  initial_thread->nice = 0;
+  initial_thread->recent_cpu = 0;
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -137,6 +152,17 @@ thread_tick (void)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
+
+
+#ifndef USERPROG
+  if (thread_prior_aging == true) 
+    thread_aging();
+#endif
+
+#ifndef USERPROG
+  if (thread_mlfqs == true) 
+    tick_mlfqs();
+#endif
 }
 
 /* Prints thread statistics. */
@@ -178,6 +204,7 @@ thread_create (const char *name, int priority,
   t = palloc_get_page (PAL_ZERO);
   if (t == NULL)
     return TID_ERROR;
+    
 
   /* Initialize thread. */
   init_thread (t, name, priority);
@@ -201,6 +228,8 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 
+  if(priority > thread_current()->priority) thread_yield();
+  
   return tid;
 }
 
@@ -237,7 +266,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered (&ready_list, &(t->elem), thread_compare_, NULL);
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -303,12 +332,13 @@ thread_yield (void)
 {
   struct thread *cur = thread_current ();
   enum intr_level old_level;
-  
+
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    list_insert_ordered(&ready_list, &cur->elem, thread_compare_, NULL);   
+
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -335,7 +365,11 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
+  int prev = thread_get_priority();
   thread_current ()->priority = new_priority;
+  if(new_priority < prev) {
+    if(!intr_context()) thread_yield();
+  }
 }
 
 /* Returns the current thread's priority. */
@@ -349,31 +383,47 @@ thread_get_priority (void)
 void
 thread_set_nice (int nice UNUSED) 
 {
-  /* Not yet implemented. */
+  struct thread * t = thread_current();
+  t->nice = nice;
+  if(t != idle_thread) {
+    long long int val = f_plus_f(i_to_f(PRI_MAX), f_div_i(t->recent_cpu, -4));
+      val = f_plus_f(val, i_to_f(-2 * t->nice));
+      val = f_to_i(val);
+      if(val > PRI_MAX) val = PRI_MAX;
+      if(val < PRI_MIN) val = PRI_MIN;
+      t -> priority = val;
+  }
+
+  if(list_size(&ready_list)) {
+    if (thread_get_priority() < list_entry(list_front(&ready_list), struct thread, elem)->priority) thread_yield();
+  }
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  struct thread * t = thread_current();
+  return t->nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  long long int ret = i_mul_f(100, load_average);
+  ret /= ONE;
+  return (int) ret;
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  struct thread * t = thread_current();
+  long long int ret = i_mul_f(100, t->recent_cpu);
+  ret /= ONE;
+  return (int) ret;
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -466,12 +516,21 @@ init_thread (struct thread *t, const char *name, int priority)
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
+
   intr_set_level (old_level);
 
+  
+  for (int i = 0; i < MAX_FILE; i++) t->fd[i] = 0;
+  
   sema_init(&(t->sema_all), 0);
   sema_init(&(t->sema_child), 0);
+  sema_init(&(t->sema_create), 0);
+  lock_init(&(t->file_lock));
+  t->parent_process = running_thread();
   list_init(&(t->childs));
   list_push_back(&(running_thread()->childs), &(t->child_elems));
+  t->recent_cpu = t->parent_process->recent_cpu;
+  t->nice = t->parent_process->nice;
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -587,3 +646,125 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+void thread_aging() {
+  struct list_elem *i = list_begin(&all_list);
+
+  while(i != list_end(&all_list)) {
+    struct thread * now = list_entry(i, struct thread, allelem);
+    
+    if (now->priority < PRI_MAX) now->priority++;
+
+    i = list_next(i);
+  }
+
+  return;
+} 
+
+void update_load_average(void) {
+  struct thread * t = thread_current();
+  int cnt = list_size(&ready_list) + (idle_thread != t);
+
+  int new_value = f_plus_i(i_mul_f(59, load_average), cnt);
+  load_average = f_div_i(new_value, 60);
+  return;
+}
+
+void update_recent_cpu(void) {
+  struct list_elem * i = list_begin(&all_list);
+  while(i != list_end(&all_list)) {
+    struct thread * now = list_entry(i, struct thread, allelem);
+
+    if(now != idle_thread) {
+      long long int val = f_div_f(i_mul_f(2, load_average), f_plus_i(i_mul_f(2, load_average), 1));
+      val = f_mul_f(val, now->recent_cpu);
+      val = f_plus_i(val, now->nice);
+      now->recent_cpu = (int)val;
+    }
+
+    i = list_next(i);
+  }
+  return;
+}
+
+void update_priority(void) {
+  struct list_elem * i = list_begin(&all_list);
+  while(i != list_end(&all_list)) {
+    struct thread * now = list_entry(i, struct thread, allelem);
+
+    if(now != idle_thread) {
+      long long int val = f_minus_f(f_plus_i(0, PRI_MAX), f_div_i(now->recent_cpu, 4));
+      val = f_minus_f(val, i_mul_f(2, f_plus_i(0, now->nice)));
+      val /= ONE;
+      if(val > PRI_MAX) val = PRI_MAX;
+      if(val < PRI_MIN) val = PRI_MIN;
+      now -> priority = val;
+    }
+
+    i = list_next(i);
+  }
+
+  if(list_size(&ready_list)) {
+    if (thread_get_priority() < list_entry(list_front(&ready_list), struct thread, elem)->priority) intr_yield_on_return();
+  }
+
+  return;
+}
+
+void tick_mlfqs(void) {
+  struct thread * t = thread_current();
+  if (t != idle_thread) t->recent_cpu = f_plus_i(t->recent_cpu, 1);
+
+  if(timer_ticks() % 100 == 0) {
+    update_load_average();
+    update_recent_cpu();
+  }
+  if(timer_ticks() % 4 == 0) update_priority();
+
+  return;
+}
+
+int i_to_f(int a) {
+  return a * ONE;
+}
+
+int f_to_i(int a) {
+  return a / ONE;
+}
+
+int f_plus_f(int a, int b) {
+    return a  + b;
+}
+
+int f_plus_i(int a, int b) {
+    return a + b * ONE;
+}
+
+int f_minus_f(int a, int b) {
+    return a - b;
+}
+
+int i_minus_f(int a, int b) {
+    return a * ONE - b;
+}
+
+int f_mul_f(int a, int b) {
+    long long int ret = a;
+    ret *= b;
+    ret /= ONE;
+    return (int) ret;
+}
+
+int i_mul_f(int a, int b) {
+    return a * b;
+}
+
+int f_div_f(int a, int b) {
+    long long int ret = a * ONE;
+    ret /= b;
+    return (int) ret;
+}
+
+int f_div_i(int a, int b) {
+    return a / b;
+}
